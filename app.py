@@ -434,7 +434,7 @@ with tab_analysis:
                     pd.DataFrame(fund_dd_rows).sort_values(
                         by="Max drawdown (%)", ascending=False
                     ),
-                    use_container_width=True,
+                    width="stretch",
                 )
 
                 mean_returns = returns.mean() * 12
@@ -746,11 +746,17 @@ with tab_analysis:
                 if dd_rows:
                     st.subheader("Max drawdown – nyckelportföljer")
                     dd_df = pd.DataFrame(dd_rows)
+                    numeric_cols = dd_df.select_dtypes(include=[np.number]).columns
+                    style = dd_df.sort_values(
+                        by="Historisk max drawdown (%)", ascending=False
+                    ).style
+                    if len(numeric_cols) > 0:
+                        style = style.format(  # type: ignore[assignment]
+                            {col: "{:.2f}" for col in numeric_cols}
+                        )
                     st.dataframe(
-                        dd_df
-                        .sort_values(by="Historisk max drawdown (%)", ascending=False)
-                        .style.format("{:.2f}"),
-                        use_container_width=True,
+                        style,
+                        width="stretch",
                     )
 
                     if max_drawdown_allowed is not None:
