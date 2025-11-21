@@ -20,7 +20,8 @@ Streamlit-app för att ladda Avanza-fonder, klassificera dem och simulera portf�
 
 ## Användning
 - **Fondhantering**: Lägg till Avanza-ID:n, inkludera fonder från en uppladdad konfiguration och justera klassificeringar via datatabellen. Du kan även ta bort fonder och spara den aktuella uppsättningen till disk.
-- **Analys**: Välj vilka fonder som ska ingå i simuleringen och kör sedan Monte Carlo och effektiva fronter. Resultat visas i diagram, tabeller och pajer för fördelning mellan fondtyper.
+- **Analys**: Välj vilka fonder som ska ingå i simuleringen och kör sedan Monte Carlo och effektiva fronter. Resultat visas i diagram, tabeller och pajer för fördelning mellan fondtyper. Historiska max drawdowns visas per fond och portfölj, inklusive en drawdown-plott som markerar fall.
+- **Drawdown-constraint**: I sidopanelen kan du sätta en gräns för tillåten max drawdown (%). Den används när Monte Carlo-portföljer genereras och när den constrained effektiva fronten tas fram.
 
 ## Miljövariabler
 - Inga specifika miljövariabler krävs. All extern data hämtas via Avanza utan autentisering.

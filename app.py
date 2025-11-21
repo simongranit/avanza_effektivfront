@@ -18,7 +18,13 @@ from optimization import (
     efficient_frontier_unconstrained,
     portfolio_stats,
 )
-from portfolio_engine import describe_portfolio, simulate_portfolios
+from portfolio_engine import (
+    bootstrap_max_drawdown,
+    describe_portfolio,
+    max_drawdown_from_prices,
+    portfolio_max_drawdown,
+    simulate_portfolios,
+)
 
 CONFIG_PATH = Path(__file__).resolve().parent / "fondkonfiguration.json"
 FUND_TYPE_OPTIONS = ["Räntefond", "Svensk aktiefond", "Utländsk aktiefond"]
@@ -178,6 +184,18 @@ max_foreign_equity_input = st.sidebar.number_input(
     step=5.0,
 )
 max_foreign_equity_frac = max_foreign_equity_input / 100.0
+
+max_drawdown_input = st.sidebar.number_input(
+    "Max tillåten max drawdown (%)",
+    0.0,
+    100.0,
+    35.0,
+    help=(
+        "Om > 0 filtreras Monte Carlo-portföljer och den constrained fronten "
+        "så att historisk max drawdown inte överskrider denna nivå."
+    ),
+)
+max_drawdown_allowed = max_drawdown_input / 100.0 if max_drawdown_input > 0 else None
 
 min_display_weight_input = st.sidebar.number_input(
     "Min vikt att visa per fond (%)",
@@ -397,6 +415,28 @@ with tab_analysis:
                     width="stretch",
                 )
 
+                st.markdown("### Historisk max drawdown per fond")
+                fund_dd_rows = []
+                for name in selected_names:
+                    dd, peak_dt, trough_dt, _ = max_drawdown_from_prices(
+                        selected_prices[name]
+                    )
+                    fund_dd_rows.append(
+                        {
+                            "Fond": name,
+                            "Max drawdown (%)": round(dd * 100, 2),
+                            "Start (peak)": peak_dt.date() if peak_dt is not None else "-",
+                            "Botten": trough_dt.date() if trough_dt is not None else "-",
+                        }
+                    )
+
+                st.dataframe(
+                    pd.DataFrame(fund_dd_rows).sort_values(
+                        by="Max drawdown (%)", ascending=False
+                    ),
+                    use_container_width=True,
+                )
+
                 mean_returns = returns.mean() * 12
                 cov_matrix = returns.cov() * 12
                 asset_names = returns.columns.tolist()
@@ -446,21 +486,27 @@ with tab_analysis:
                     )
                     st.stop()
 
-                sim = simulate_portfolios(
-                    returns=returns,
-                    swe_eq_mask=swe_eq_mask,
-                    for_eq_mask=for_eq_mask,
-                    max_weight=max_weight,
-                    max_equity_share=max_equity_share,
-                    max_foreign_equity_frac=max_foreign_equity_frac,
-                    n_portfolios=n_portfolios,
-                    rf=rf,
-                )
+                try:
+                    sim = simulate_portfolios(
+                        returns=returns,
+                        swe_eq_mask=swe_eq_mask,
+                        for_eq_mask=for_eq_mask,
+                        max_weight=max_weight,
+                        max_equity_share=max_equity_share,
+                        max_foreign_equity_frac=max_foreign_equity_frac,
+                        n_portfolios=n_portfolios,
+                        rf=rf,
+                        max_drawdown=max_drawdown_allowed,
+                    )
+                except Exception as e:
+                    st.error(f"Kunde inte simulera Monte Carlo-portföljer: {e}")
+                    st.stop()
 
                 port_returns = sim["returns"]
                 port_vols = sim["vols"]
                 sharpes = sim["sharpes"]
                 weights_mc = sim["weights"]
+                drawdowns = sim["drawdowns"]
 
                 mc_min_idx = np.argmin(port_vols)
                 mc_max_idx = np.nanargmax(sharpes)
@@ -498,6 +544,8 @@ with tab_analysis:
                             max_weight=max_weight,
                             max_equity_share=max_equity_share,
                             max_foreign_equity_frac=max_foreign_equity_frac,
+                            returns_history=returns,
+                            max_drawdown=max_drawdown_allowed,
                         )
                     )
                 except Exception as e:
@@ -545,6 +593,76 @@ with tab_analysis:
                     )
                 else:
                     r_max_con = v_max_con = np.nan
+
+                def build_portfolio_returns(weights: np.ndarray | None) -> pd.Series:
+                    if weights is None or returns.empty:
+                        return pd.Series(dtype=float)
+                    return returns.mul(weights, axis=1).sum(axis=1)
+
+                dd_rows: list[dict[str, object]] = []
+
+                def add_dd_row(
+                    label: str,
+                    weights: np.ndarray | None,
+                    exp_ret: float,
+                    exp_vol: float,
+                ) -> None:
+                    if weights is None or returns.empty or np.isnan(exp_ret):
+                        return
+                    dd_val, peak_dt, trough_dt, _ = portfolio_max_drawdown(
+                        returns, weights
+                    )
+                    sim_dd = bootstrap_max_drawdown(
+                        build_portfolio_returns(weights), n_simulations=150
+                    )
+                    dd_rows.append(
+                        {
+                            "Portfölj": label,
+                            "Förväntad avkastning (%)": exp_ret * 100,
+                            "Årsvolatilitet (%)": exp_vol * 100,
+                            "Historisk max drawdown (%)": dd_val * 100,
+                            "Simulerad max drawdown (bootstrap) (%)": sim_dd * 100,
+                            "Peak": peak_dt.date() if peak_dt is not None else "-",
+                            "Botten": trough_dt.date() if trough_dt is not None else "-",
+                        }
+                    )
+
+                add_dd_row(
+                    "Monte Carlo – lägst risk",
+                    w_mc_min,
+                    mc_min_desc["Förväntad årsavkastning"],
+                    mc_min_desc["Årsvolatilitet"],
+                )
+                add_dd_row(
+                    "Monte Carlo – bäst Sharpe",
+                    w_mc_max,
+                    mc_max_desc["Förväntad årsavkastning"],
+                    mc_max_desc["Årsvolatilitet"],
+                )
+                add_dd_row(
+                    "Constrained – minsta varians",
+                    w_min_con,
+                    r_min_con,
+                    v_min_con,
+                )
+                add_dd_row(
+                    "Constrained – Max Sharpe",
+                    w_max_con,
+                    r_max_con,
+                    v_max_con,
+                )
+                add_dd_row(
+                    "Teoretisk – minsta varians",
+                    w_min_unc,
+                    r_min_unc,
+                    v_min_unc,
+                )
+                add_dd_row(
+                    "Teoretisk – Max Sharpe",
+                    w_max_unc,
+                    r_max_unc,
+                    v_max_unc,
+                )
 
                 st.subheader("Resultat: Risk–avkastningsdiagram")
 
@@ -624,6 +742,95 @@ with tab_analysis:
                 ax.grid(True)
                 ax.legend()
                 st.pyplot(fig, clear_figure=True)
+
+                if dd_rows:
+                    st.subheader("Max drawdown – nyckelportföljer")
+                    dd_df = pd.DataFrame(dd_rows)
+                    st.dataframe(
+                        dd_df
+                        .sort_values(by="Historisk max drawdown (%)", ascending=False)
+                        .style.format("{:.2f}"),
+                        use_container_width=True,
+                    )
+
+                    if max_drawdown_allowed is not None:
+                        st.caption(
+                            f"Drawdown-constraint: max {max_drawdown_input:.0f} % på historiska serier "
+                            "(gäller Monte Carlo och constrained front)."
+                        )
+
+                    if drawdowns.size > 0:
+                        st.write(
+                            f"Median historisk max drawdown bland simulerade portföljer: {np.median(drawdowns)*100:.2f} % "
+                            f"(10:e percentilen: {np.percentile(drawdowns, 10)*100:.2f} %, 90:e percentilen: {np.percentile(drawdowns, 90)*100:.2f} %)."
+                        )
+
+                plot_weights = None
+                plot_label = None
+                if w_max_con is not None:
+                    plot_weights = w_max_con
+                    plot_label = "Max Sharpe (constrained)"
+                elif w_mc_max is not None:
+                    plot_weights = w_mc_max
+                    plot_label = "Monte Carlo – bäst Sharpe"
+                elif w_max_unc is not None:
+                    plot_weights = w_max_unc
+                    plot_label = "Max Sharpe (teoretisk)"
+
+                if plot_weights is not None:
+                    port_ret_series = build_portfolio_returns(plot_weights)
+                    if not port_ret_series.empty:
+                        dd_plot, peak_dt, trough_dt, _ = portfolio_max_drawdown(
+                            returns, plot_weights
+                        )
+                        cumulative = (1 + port_ret_series).cumprod()
+                        cumulative = cumulative / cumulative.iloc[0]
+                        running_max = cumulative.cummax()
+
+                        fig_dd, ax_dd = plt.subplots(figsize=(10, 4))
+                        ax_dd.plot(
+                            cumulative.index,
+                            cumulative * 100,
+                            label=f"{plot_label} (index = 100)",
+                            color="tab:blue",
+                        )
+                        ax_dd.plot(
+                            running_max.index,
+                            running_max * 100,
+                            linestyle="--",
+                            color="gray",
+                            label="Löpande topp",
+                        )
+                        ax_dd.fill_between(
+                            cumulative.index,
+                            cumulative * 100,
+                            running_max * 100,
+                            where=cumulative < running_max,
+                            color="salmon",
+                            alpha=0.3,
+                            label="Drawdown",
+                        )
+                        if peak_dt is not None:
+                            ax_dd.axvline(peak_dt, color="green", linestyle=":", label="Peak")
+                        if trough_dt is not None:
+                            ax_dd.axvline(trough_dt, color="red", linestyle=":", label="Botten")
+                            ax_dd.scatter(
+                                [trough_dt],
+                                [cumulative.loc[trough_dt] * 100],
+                                color="red",
+                                zorder=5,
+                            )
+                        ax_dd.set_title(
+                            f"Max drawdown för {plot_label}: {dd_plot*100:.2f} %"
+                        )
+                        ax_dd.set_ylabel("Index (start = 100)")
+                        ax_dd.grid(True)
+                        ax_dd.legend()
+                        st.pyplot(fig_dd, clear_figure=True)
+                    else:
+                        st.info(
+                            "Ingen historisk avkastningsserie kunde tas fram för drawdown-plott."
+                        )
 
                 st.subheader("Förväntad utveckling över 10 år")
 

@@ -1,7 +1,11 @@
 # optimization.py
+from typing import Optional
+
+import cvxpy as cp
 import numpy as np
 import pandas as pd
-import cvxpy as cp
+
+from portfolio_engine import portfolio_max_drawdown
 
 
 def portfolio_stats(weights: np.ndarray,
@@ -88,7 +92,9 @@ def efficient_frontier_constrained(mean_returns: pd.Series,
                                    max_weight: float,
                                    max_equity_share: float,
                                    max_foreign_equity_frac: float,
-                                   n_points: int = 40):
+                                   n_points: int = 40,
+                                   returns_history: pd.DataFrame | None = None,
+                                   max_drawdown: Optional[float] = None):
     """
     Effektiv front med SAMMA constraints som Monte Carlo:
 
@@ -147,6 +153,12 @@ def efficient_frontier_constrained(mean_returns: pd.Series,
             continue
 
         w_opt = np.array(w.value).reshape(-1)
+
+        if max_drawdown is not None and returns_history is not None:
+            dd, _, _, _ = portfolio_max_drawdown(returns_history, w_opt)
+            if dd > max_drawdown:
+                continue
+
         r, v = portfolio_stats(w_opt, mean_returns, cov_matrix)
         frontier_ret.append(r)
         frontier_risk.append(v)
