@@ -27,13 +27,17 @@ Streamlit-app för att ladda Avanza-fonder, klassificera dem och simulera portf�
 - Inga specifika miljövariabler krävs. All extern data hämtas via Avanza utan autentisering.
 
 ## Testning
+- Enhetstester körs med pytest:
+  ```bash
+  pytest
+  ```
 - Snabb syntaxkontroll kan göras med:
   ```bash
   python -m py_compile app.py config_io.py data_loader.py optimization.py portfolio_engine.py
   ```
 
 ## Föreslagna beroendeändringar
-- Inga ändringar föreslagna; befintliga paket räcker för nuvarande funktioner.
+- Lägg till `pytest>=8.3.0` för att köra testsviten.
 
 ## Kända begränsningar
 - Avanza-API:t kan begränsa antalet anrop; stora mängder fond-ID:n kan därför ta tid eller misslyckas.
