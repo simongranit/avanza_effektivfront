@@ -1,0 +1,85 @@
+# ================================
+# Python
+# ================================
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.pdb
+*.egg-info/
+*.egg
+*.pickle
+*.pkl
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# PyCharm / JetBrains
+.idea/
+*.iml
+
+# ================================
+# Streamlit cache
+# ================================
+.streamlit/
+**/.streamlit/
+
+# Streamlit upload temp
+.streamlit-cache/
+.streamlit_cache/
+.streamlit-assets/
+
+# ================================
+# OS / System files
+# ================================
+.DS_Store
+Thumbs.db
+
+# ================================
+# Project-specific files
+# ================================
+
+# Local config & API keys
+config.json
+settings.json
+secrets.json
+*.env
+
+# Avanza downloaded data
+*.json
+*.csv
+data/
+downloads/
+
+# Logs
+logs/
+*.log
+
+# Temporary output
+temp/
+tmp/
+*.tmp
+
+# Cache
+cache/
+__cache__/
+*.cache
+
+# Model files (om du jobbar med ML)
+models/
+*.h5
+*.pt
+*.pth
+
+# ================================
+# Build artifacts
+# ================================
+dist/
+build/
+*.spec
