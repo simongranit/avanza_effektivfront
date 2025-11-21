@@ -52,7 +52,7 @@ secrets.json
 *.env
 
 # Avanza downloaded data
-*.json
+#*.json
 *.csv
 data/
 downloads/

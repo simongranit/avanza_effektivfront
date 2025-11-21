@@ -1,0 +1,67 @@
+[
+  {
+    "fund_id": "1961",
+    "type": "Svensk aktiefond",
+    "label": "Aktiespararna Topp Sverige A (1961)"
+  },
+  {
+    "fund_id": "1971",
+    "type": "Svensk aktiefond",
+    "label": "Lannebo Sverige (1971)"
+  },
+  {
+    "fund_id": "2014",
+    "type": "Svensk aktiefond",
+    "label": "Lannebo Småbolag A (2014)"
+  },
+  {
+    "fund_id": "2066",
+    "type": "Räntefond",
+    "label": "Pareto Räntefond A (2066)"
+  },
+  {
+    "fund_id": "2069",
+    "type": "Räntefond",
+    "label": "Lannebo Räntefond Kort (2069)"
+  },
+  {
+    "fund_id": "2088",
+    "type": "Räntefond",
+    "label": "Länsförsäkringar Lång Räntefond A (2088)"
+  },
+  {
+    "fund_id": "2111",
+    "type": "Räntefond",
+    "label": "AMF Räntefond Lång (2111)"
+  },
+  {
+    "fund_id": "2802",
+    "type": "Räntefond",
+    "label": "AMF Räntefond Kort (2802)"
+  },
+  {
+    "fund_id": "315116",
+    "type": "Svensk aktiefond",
+    "label": "Handelsbanken Sverige 100 Index (A1 SEK) (315116)"
+  },
+  {
+    "fund_id": "333557",
+    "type": "Räntefond",
+    "label": "AMF Räntefond Mix (333557)"
+  },
+  {
+    "fund_id": "592236",
+    "type": "Utländsk aktiefond",
+    "label": "Swedbank Robur Access Europa A (592236)"
+  },
+  {
+    "fund_id": "652895",
+    "type": "Utländsk aktiefond",
+    "label": "Storebrand Global Plus A SEK (652895)"
+  },
+  {
+    "fund_id": "694253",
+    "type": "Svensk aktiefond",
+    "label": "Cliens Småbolag A (694253)"
+  }
+]
