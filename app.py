@@ -1,254 +1,31 @@
 import datetime as dt
-from typing import Dict, List
 
 import numpy as np
 import pandas as pd
-import requests
-import streamlit as st
 import matplotlib.pyplot as plt
-import json
+import streamlit as st
+from pathlib import Path
 
-AVANZA_BASE_URL = (
-    "https://www.avanza.se/_api/fund-guide/chart/"
-    "{fund_id}/{from_date}/{to_date}?raw=true"
+from data_loader import fetch_fund_history, build_return_matrix
+from config_io import (
+    load_config,
+    build_fund_type_map,
+    parse_fund_id_from_label,
+    create_config,
+)
+from portfolio_engine import (
+    simulate_portfolios,
+    describe_portfolio,
+)
+from optimization import (
+    efficient_frontier_unconstrained,
+    efficient_frontier_constrained,
+    portfolio_stats,
 )
 
-# ------------------------------
-# Hjälpfunktioner
-# ------------------------------
 
-@st.cache_data(show_spinner=False)
-def fetch_fund_history(fund_id: str, from_date: str, to_date: str) -> pd.Series:
-    """Hämtar fondhistorik från Avanza och returnerar prisserie (Series med datumindex)."""
-    url = AVANZA_BASE_URL.format(
-        fund_id=fund_id,
-        from_date=from_date,
-        to_date=to_date,
-    )
-    resp = requests.get(url)
-    resp.raise_for_status()
-    data = resp.json()
-
-    serie = pd.DataFrame(data["dataSerie"])
-    serie["date"] = pd.to_datetime(serie["x"], unit="ms")
-    serie = serie.set_index("date")["y"].astype(float)
-    serie.name = f'{data.get("name", "Fond")} ({fund_id})'
-    return serie
-
-
-def build_return_matrix(price_series: Dict[str, pd.Series], freq: str = "M") -> pd.DataFrame:
-    """Bygger synkroniserade månadsavkastningar från prisserier."""
-    dfs = []
-    for name, s in price_series.items():
-        r = s.resample(freq).last().pct_change()
-        r.name = name
-        dfs.append(r)
-    returns = pd.concat(dfs, axis=1).dropna()
-    return returns
-
-
-def sample_weights_with_constraints(
-    n_assets: int,
-    swe_eq_idx: np.ndarray,
-    for_eq_idx: np.ndarray,
-    bond_idx: np.ndarray,
-    max_weight: float,
-    max_equity: float,
-    max_foreign_equity_frac: float,
-    min_equity: float = 0.0,
-    max_tries: int = 3000,
-) -> np.ndarray:
-    """
-    Slumpar vikter med:
-      - sum(w) = 1
-      - 0 <= w_i <= max_weight
-      - min_equity <= sum(equity) <= max_equity
-      - (sum(foreign_equity) / sum(equity)) <= max_foreign_equity_frac
-    """
-    n_se = len(swe_eq_idx)
-    n_fe = len(for_eq_idx)
-    n_b = len(bond_idx)
-
-    for _ in range(max_tries):
-        w = np.zeros(n_assets)
-
-        # 1) Slumpa total aktieandel
-        if (n_se + n_fe) > 0:
-            equity_share = np.random.uniform(min_equity, max_equity)
-        else:
-            equity_share = 0.0
-        bond_share = 1.0 - equity_share
-
-        # per-fond-cap grovkoll
-        if (n_se + n_fe) > 0 and (n_se + n_fe) * max_weight < equity_share - 1e-9:
-            continue
-        if n_b > 0 and n_b * max_weight < bond_share - 1e-9:
-            continue
-        if n_b == 0 and bond_share > 1e-9:
-            # kräver räntedel men har inga räntefonder
-            continue
-
-        # 2) Dela upp aktiedelen i svensk & utländsk med constraint
-        if equity_share > 0 and n_fe > 0 and max_foreign_equity_frac > 0:
-            # andel av aktiedelen som får vara utländsk
-            u = np.random.uniform(0.0, max_foreign_equity_frac)
-            foreign_share = equity_share * u
-        else:
-            foreign_share = 0.0
-
-        swe_share = equity_share - foreign_share
-
-        # feasibility per-fond inom grupper
-        if n_fe > 0 and n_fe * max_weight < foreign_share - 1e-9:
-            continue
-        if n_se > 0 and n_se * max_weight < swe_share - 1e-9:
-            continue
-        if n_se == 0 and swe_share > 1e-9:
-            # ingen svensk aktiefond men krav på svensk del
-            continue
-
-        # 3) Slumpa inom svensk aktiedel
-        if n_se > 0 and swe_share > 0:
-            we_s = np.random.dirichlet(np.ones(n_se)) * swe_share
-            for _ in range(20):
-                over = we_s > max_weight + 1e-9
-                if not over.any():
-                    break
-                excess = we_s[over] - max_weight
-                we_s[over] = max_weight
-                under = ~over
-                if under.any():
-                    we_s[under] += excess.sum() * (we_s[under] / we_s[under].sum())
-                else:
-                    break
-        else:
-            we_s = np.zeros(n_se)
-
-        # 4) Slumpa inom utländsk aktiedel
-        if n_fe > 0 and foreign_share > 0:
-            we_f = np.random.dirichlet(np.ones(n_fe)) * foreign_share
-            for _ in range(20):
-                over = we_f > max_weight + 1e-9
-                if not over.any():
-                    break
-                excess = we_f[over] - max_weight
-                we_f[over] = max_weight
-                under = ~over
-                if under.any():
-                    we_f[under] += excess.sum() * (we_f[under] / we_f[under].sum())
-                else:
-                    break
-        else:
-            we_f = np.zeros(n_fe)
-
-        # 5) Slumpa inom räntedel
-        if n_b > 0 and bond_share > 0:
-            wb = np.random.dirichlet(np.ones(n_b)) * bond_share
-            for _ in range(20):
-                over = wb > max_weight + 1e-9
-                if not over.any():
-                    break
-                excess = wb[over] - max_weight
-                wb[over] = max_weight
-                under = ~over
-                if under.any():
-                    wb[under] += excess.sum() * (wb[under] / wb[under].sum())
-                else:
-                    break
-        else:
-            wb = np.zeros(n_b)
-
-        w[swe_eq_idx] = we_s
-        w[for_eq_idx] = we_f
-        w[bond_idx] = wb
-
-        # slutkoller
-        if not np.isclose(w.sum(), 1.0, atol=1e-6):
-            continue
-        if (w > max_weight + 1e-6).any():
-            continue
-
-        total_equity = w[swe_eq_idx].sum() + w[for_eq_idx].sum()
-        foreign_equity = w[for_eq_idx].sum()
-
-        if total_equity > 0:
-            frac_foreign_equity = foreign_equity / total_equity
-            if frac_foreign_equity > max_foreign_equity_frac + 1e-6:
-                continue
-
-        if not (min_equity - 1e-6 <= total_equity <= max_equity + 1e-6):
-            continue
-
-        return w
-
-    raise RuntimeError("Kunde inte generera vikter med givna restriktioner (inkl. utländsk aktiedel).")
-
-
-def simulate_portfolios(
-    returns: pd.DataFrame,
-    swe_eq_mask: np.ndarray,
-    for_eq_mask: np.ndarray,
-    max_weight: float,
-    max_equity_share: float,
-    max_foreign_equity_frac: float,
-    n_portfolios: int,
-    rf: float,
-):
-    """Monte Carlo-simulering med alla constraints."""
-    mean_returns = returns.mean() * 12
-    cov_matrix = returns.cov() * 12
-    n_assets = returns.shape[1]
-
-    swe_idx = np.where(swe_eq_mask)[0]
-    for_idx = np.where(for_eq_mask)[0]
-    bond_idx = np.where(~(swe_eq_mask | for_eq_mask))[0]
-
-    port_returns, port_vols, sharpes, weights = [], [], [], []
-
-    for _ in range(n_portfolios):
-        w = sample_weights_with_constraints(
-            n_assets=n_assets,
-            swe_eq_idx=swe_idx,
-            for_eq_idx=for_idx,
-            bond_idx=bond_idx,
-            max_weight=max_weight,
-            max_equity=max_equity_share,
-            max_foreign_equity_frac=max_foreign_equity_frac,
-        )
-        r = np.dot(w, mean_returns)
-        v = np.sqrt(w.T @ cov_matrix.values @ w)
-        s = (r - rf) / v if v > 0 else np.nan
-
-        port_returns.append(r)
-        port_vols.append(v)
-        sharpes.append(s)
-        weights.append(w)
-
-    return {
-        "returns": np.array(port_returns),
-        "vols": np.array(port_vols),
-        "sharpes": np.array(sharpes),
-        "weights": np.array(weights),
-        "mean_returns": mean_returns,
-        "cov_matrix": cov_matrix,
-    }
-
-
-
-def describe_portfolio(
-    weights: np.ndarray,
-    asset_names: List[str],
-    annual_returns: pd.Series,
-    cov_matrix: pd.DataFrame,
-) -> pd.Series:
-    """Skapar en Serie med avkastning, risk och vikter."""
-    w = weights
-    r = np.dot(w, annual_returns)
-    v = np.sqrt(w.T @ cov_matrix.values @ w)
-    s = pd.Series({"Förväntad årsavkastning": r, "Årsvolatilitet": v})
-    for i, name in enumerate(asset_names):
-        s[f"Vikt {name}"] = w[i]
-    return s
+# Var ska standard-konfigurationen ligga?
+CONFIG_PATH = Path(__file__).resolve().parent / "fondkonfiguration.json"
 
 
 # ------------------------------
@@ -262,42 +39,73 @@ st.markdown(
     """
 Flöde:
 
-1. **Ladda fonder** via Avanza-ID  
+1. **Ladda fonder** via Avanza-ID eller konfigurationsfil  
 2. **Välj & klassificera** (räntefond / svensk aktiefond / utländsk aktiefond)  
-3. **Kör simulering** med begränsningar:
-   - max vikt per fond  
-   - max andel aktiefonder totalt  
-   - max andel **utländska aktiefonder av aktiedelen**
+3. **Kör analys** med:
+   - Monte Carlo (med dina constraints)  
+   - Teoretisk effektiv front (utan constraints)  
+   - Effektiv front med constraints  
+   - Minsta varians- & Max Sharpe-portföljer (både teoretisk & constrained)
 """
 )
 
-# init state
+# ------------------------------
+# Session state
+# ------------------------------
+
 if "price_series" not in st.session_state:
     st.session_state["price_series"] = None
 if "fund_types" not in st.session_state:
     st.session_state["fund_types"] = {}
+if "loaded_config" not in st.session_state:
+    st.session_state["loaded_config"] = None
+if "fund_type_map_by_id" not in st.session_state:
+    st.session_state["fund_type_map_by_id"] = {}
 
-# SIDEBAR
+# ------------------------------
+# SIDEBAR – generella inställningar
+# ------------------------------
+
 st.sidebar.header("Generella inställningar")
 
 st.sidebar.markdown("### Ladda sparad konfiguration")
-config_file = st.sidebar.file_uploader("Välj JSON-fil", type=["json"])
+
+# 1) Försök auto-ladda från fondkonfiguration.json i projektroten
+if "loaded_config" not in st.session_state:
+    st.session_state["loaded_config"] = None
+
+if st.session_state["loaded_config"] is None and CONFIG_PATH.exists():
+    try:
+        with CONFIG_PATH.open("r", encoding="utf-8") as f:
+            loaded_config = load_config(f)
+        st.session_state["loaded_config"] = loaded_config
+        st.session_state["fund_type_map_by_id"] = build_fund_type_map(loaded_config)
+        st.sidebar.success(f"Laddade {CONFIG_PATH.name} från disk.")
+    except Exception as e:
+        st.sidebar.warning(f"Kunde inte läsa {CONFIG_PATH.name}: {e}")
+
+# 2) Möjlighet att ladda annan fil manuellt
+config_file = st.sidebar.file_uploader("Ladda annan JSON-fil (valfritt)", type=["json"])
 
 if config_file is not None:
     try:
-        loaded_config = json.load(config_file)
+        loaded_config = load_config(config_file)
         st.session_state["loaded_config"] = loaded_config
+        st.session_state["fund_type_map_by_id"] = build_fund_type_map(loaded_config)
 
-        ids_from_config = sorted({str(item["fund_id"]) for item in loaded_config if item.get("fund_id")})
-        st.sidebar.success(f"Laddade {len(ids_from_config)} fonder från konfiguration.")
+        ids_from_config = sorted(
+            {str(item["fund_id"]) for item in loaded_config if item.get("fund_id")}
+        )
+        st.sidebar.success(f"Laddade {len(ids_from_config)} fonder från uppladdad fil.")
         st.sidebar.write("Fonder i filen:", ", ".join(ids_from_config))
     except Exception as e:
-        st.sidebar.error(f"Kunde inte läsa konfigurationen: {e}")
+        st.sidebar.error(f"Kunde inte läsa uppladdad konfiguration: {e}")
 
 
+# ---- Manuell inmatning av Avanza-ID ----
 ids_input = st.sidebar.text_area(
     "Avanza fond-ID (komma- eller radseparerade)",
-    value="2111\n1961\n315116\n2014\n1971\n652895\n592236\n2069\n2066\n694253\n363\n685395\n1505\n325406\n878733\n536695\n2088",
+    value="",
 )
 
 today = dt.date.today()
@@ -333,21 +141,39 @@ min_display_weight_input = st.sidebar.number_input(
 )
 min_display_weight = min_display_weight_input / 100.0
 
-
 n_portfolios = int(
-    st.sidebar.number_input("Antal simulerade portföljer", 1000, 50000, 5000, step=1000)
+    st.sidebar.number_input("Antal Monte Carlo-portföljer", 1000, 50000, 5000, step=1000)
 )
 
-# ---- STEG 1: Ladda fonder ----
+show_monte_carlo = st.sidebar.checkbox("Visa Monte Carlo-spridning", value=True)
+show_theoretical = st.sidebar.checkbox("Visa teoretisk (unconstrained) front", value=True)
+
+# ------------------------------
+# STEG 1 – Ladda fonder
+# ------------------------------
+
 st.subheader("Steg 1: Ladda fonder från Avanza")
 load_button = st.button("🔄 Ladda fonder")
 
 if load_button:
-    ids = [x.strip() for x in ids_input.replace(",", "\n").splitlines() if x.strip()]
+    # IDs från textarea
+    ids_text = [x.strip() for x in ids_input.replace(",", "\n").splitlines() if x.strip()]
+
+    # IDs från ev. konfigurationsfil
+    loaded_config = st.session_state.get("loaded_config")
+    ids_from_cfg = []
+    if loaded_config is not None:
+        ids_from_cfg = [
+            str(item["fund_id"]) for item in loaded_config if item.get("fund_id")
+        ]
+
+    # Unik lista
+    ids = sorted(set(ids_text + ids_from_cfg))
+
     if not ids:
-        st.error("Du måste ange minst ett Avanza-ID.")
+        st.error("Du måste ange minst ett Avanza-ID (eller ha det i konfigurationsfilen).")
     else:
-        price_series: Dict[str, pd.Series] = {}
+        price_series = {}
         errors = []
 
         from_str = start_date.isoformat()
@@ -370,15 +196,18 @@ if load_button:
         if price_series:
             st.session_state["price_series"] = price_series
             st.success(f"Hämtade data för {len(price_series)} fonder.")
-            st.write("Exempel på prisdata:")
+            st.write("Exempel på prisdata (sista 5 värden):")
             st.dataframe(
                 pd.concat(price_series, axis=1).tail().style.format("{:.2f}"),
-                use_container_width=True,
+                width="stretch",
             )
         else:
             st.error("Ingen fonddata kunde hämtas.")
 
-# ---- STEG 2: Välj & klassificera ----
+# ------------------------------
+# STEG 2 – Välj & klassificera
+# ------------------------------
+
 price_series = st.session_state["price_series"]
 
 if price_series is not None:
@@ -394,68 +223,57 @@ if price_series is not None:
     if len(selected_names) >= 2:
         cols = st.columns(2)
         fund_types = st.session_state["fund_types"]
-
-        st.markdown("Markera typ för varje fond:")
-
-        fund_types = st.session_state["fund_types"]
-        loaded_config = st.session_state.get("loaded_config")  # 👈 från file_uploader i sidebar
+        fund_type_map_by_id = st.session_state.get("fund_type_map_by_id", {})
 
         st.markdown("Markera typ för varje fond:")
 
         for i, name in enumerate(selected_names):
             with cols[i % 2]:
                 cfg_type = None
-
-                # Försök hitta typ i laddad konfiguration (om sådan finns)
-                if loaded_config is not None:
-                    fund_id = None
-                    if "(" in name and name.endswith(")"):
-                        fund_id = name.split("(")[-1].strip(")")
-                    if fund_id:
-                        for item in loaded_config:
-                            if str(item.get("fund_id")) == fund_id:
-                                cfg_type = item.get("type")
-                                break
+                fid = parse_fund_id_from_label(name)
+                if fid and fid in fund_type_map_by_id:
+                    cfg_type = fund_type_map_by_id[fid]
 
                 if cfg_type in ["Räntefond", "Svensk aktiefond", "Utländsk aktiefond"]:
                     default_type = cfg_type
                 else:
-                    # fallback: gissa som tidigare
+                    # fallback: gissa baserat på namn eller tidigare val
                     default_type = fund_types.get(
                         name,
-                        "Svensk aktiefond" if ("Sverige" in name or "OMX" in name) else
-                        ("Utländsk aktiefond" if ("Global" in name or "World" in name or "USA" in name) else "Räntefond")
+                        "Svensk aktiefond"
+                        if ("Sverige" in name or "OMX" in name)
+                        else (
+                            "Utländsk aktiefond"
+                            if ("Global" in name or "World" in name or "USA" in name)
+                            else "Räntefond"
+                        ),
                     )
 
                 choice = st.selectbox(
                     f"Typ för {name}",
                     ["Räntefond", "Svensk aktiefond", "Utländsk aktiefond"],
-                    index=["Räntefond", "Svensk aktiefond", "Utländsk aktiefond"].index(default_type),
+                    index=["Räntefond", "Svensk aktiefond", "Utländsk aktiefond"].index(
+                        default_type
+                    ),
                 )
                 fund_types[name] = choice
 
+        st.session_state["fund_types"] = fund_types
 
-        # Efter att fund_types fyllts på i steg 2
+        # --- Spara konfiguration ---
         st.subheader("Spara fondval & klassificering")
 
-        if st.button("💾 Skapa konfigurationsfil"):
-            config = []
-            for name in selected_names:
-                ftype = fund_types[name]
-                # Plocka ut Avanza-ID ur namnet: "Fondnamn (12345)"
-                fund_id = None
-                if "(" in name and name.endswith(")"):
-                    fund_id = name.split("(")[-1].strip(")")
-                config.append(
-                    {
-                        "fund_id": fund_id,
-                        "type": ftype,
-                        "label": name,
-                    }
-                )
+        if st.button("💾 Skapa / uppdatera konfigurationsfil"):
+            json_str = create_config(selected_names, fund_types)
 
-            json_str = json.dumps(config, ensure_ascii=False, indent=2)
+            # 1) Spara till root (samma katalog som app.py)
+            try:
+                CONFIG_PATH.write_text(json_str, encoding="utf-8")
+                st.success(f"Konfiguration sparad till {CONFIG_PATH.name} i projektroten.")
+            except Exception as e:
+                st.error(f"Kunde inte spara till {CONFIG_PATH.name}: {e}")
 
+            # 2) Erbjud nedladdning i webbläsaren
             st.download_button(
                 "Ladda ner fondkonfiguration",
                 data=json_str,
@@ -463,20 +281,29 @@ if price_series is not None:
                 mime="application/json",
             )
 
-        # ---- STEG 3: Kör simulering ----
-        st.subheader("Steg 3: Kör portföljsimulering")
-        run_button = st.button("▶ Kör simulering")
+        # ------------------------------
+        # STEG 3 – Simulering & teori
+        # ------------------------------
+
+        st.subheader("Steg 3: Kör portföljsimulering & effektiv front")
+        run_button = st.button("▶ Kör analys")
 
         if run_button:
+            # --- Avkastningsmatris ---
             selected_prices = {name: price_series[name] for name in selected_names}
-            returns = build_return_matrix(selected_prices)
+            returns = build_return_matrix(selected_prices, freq="ME")
 
             st.write("Månadsavkastningar (sista 5 rader):")
             st.dataframe(
                 (returns.tail() * 100).round(2).style.format("{:.2f}%"),
-                use_container_width=True,
+                width="stretch",
             )
 
+            mean_returns = returns.mean() * 12
+            cov_matrix = returns.cov() * 12
+            asset_names = returns.columns.tolist()
+
+            # --- Bygg maskerna för fondtyper ---
             fund_types_now = st.session_state["fund_types"]
             swe_eq_mask = np.array(
                 [fund_types_now[name] == "Svensk aktiefond" for name in selected_names]
@@ -491,7 +318,7 @@ if price_series is not None:
 
             min_bond_share = 1.0 - max_equity_share
 
-            # feasibility checks
+            # --- Feasibility-checks ---
             if len(selected_names) * max_weight < 1.0 - 1e-9:
                 st.error(
                     f"Max {max_weight*100:.1f} % per fond med endast {len(selected_names)} fonder "
@@ -523,6 +350,7 @@ if price_series is not None:
                 )
                 st.stop()
 
+            # --- Monte Carlo (constrained) ---
             sim = simulate_portfolios(
                 returns=returns,
                 swe_eq_mask=swe_eq_mask,
@@ -537,165 +365,312 @@ if price_series is not None:
             port_returns = sim["returns"]
             port_vols = sim["vols"]
             sharpes = sim["sharpes"]
-            weights = sim["weights"]
-            mean_returns = sim["mean_returns"]
-            cov_matrix = sim["cov_matrix"]
-            asset_names = returns.columns.tolist()
+            weights_mc = sim["weights"]
 
-            min_idx = np.argmin(port_vols)
-            max_idx = np.nanargmax(sharpes)
+            # Monte Carlo nyckelportföljer
+            mc_min_idx = np.argmin(port_vols)
+            mc_max_idx = np.nanargmax(sharpes)
+            w_mc_min = weights_mc[mc_min_idx]
+            w_mc_max = weights_mc[mc_max_idx]
 
-            w_min = weights[min_idx]
-            w_max = weights[max_idx]
+            mc_min_desc = describe_portfolio(w_mc_min, asset_names, mean_returns, cov_matrix)
+            mc_max_desc = describe_portfolio(w_mc_max, asset_names, mean_returns, cov_matrix)
 
-            min_desc = describe_portfolio(w_min, asset_names, mean_returns, cov_matrix)
-            max_desc = describe_portfolio(w_max, asset_names, mean_returns, cov_matrix)
+            # --- Teoretisk (unconstrained) effektiv front ---
+            w_min_unc = w_max_unc = None
+            front_risk_unc = front_ret_unc = np.array([])
 
-            # plot
+            try:
+                front_risk_unc, front_ret_unc, w_min_unc, w_max_unc = (
+                    efficient_frontier_unconstrained(mean_returns, cov_matrix, rf)
+                )
+            except Exception as e:
+                st.warning(f"Kunde inte beräkna teoretisk (unconstrained) front: {e}")
+
+            # --- Constrained effektiv front ---
+            w_min_con = w_max_con = None
+            front_risk_con = front_ret_con = np.array([])
+
+            try:
+                front_risk_con, front_ret_con, w_min_con, w_max_con = (
+                    efficient_frontier_constrained(
+                        mean_returns,
+                        cov_matrix,
+                        rf,
+                        swe_eq_mask=swe_eq_mask,
+                        for_eq_mask=for_eq_mask,
+                        max_weight=max_weight,
+                        max_equity_share=max_equity_share,
+                        max_foreign_equity_frac=max_foreign_equity_frac,
+                    )
+                )
+            except Exception as e:
+                st.warning(f"Kunde inte beräkna constrained front: {e}")
+
+            # --- Stats & beskrivningar för fronter ---
+            min_desc_unc = max_desc_unc = None
+            min_desc_con = max_desc_con = None
+
+            if w_min_unc is not None:
+                r_min_unc, v_min_unc = portfolio_stats(w_min_unc, mean_returns, cov_matrix)
+                min_desc_unc = describe_portfolio(w_min_unc, asset_names, mean_returns, cov_matrix)
+            else:
+                r_min_unc = v_min_unc = np.nan
+
+            if w_max_unc is not None:
+                r_max_unc, v_max_unc = portfolio_stats(w_max_unc, mean_returns, cov_matrix)
+                max_desc_unc = describe_portfolio(w_max_unc, asset_names, mean_returns, cov_matrix)
+            else:
+                r_max_unc = v_max_unc = np.nan
+
+            if w_min_con is not None:
+                r_min_con, v_min_con = portfolio_stats(w_min_con, mean_returns, cov_matrix)
+                min_desc_con = describe_portfolio(w_min_con, asset_names, mean_returns, cov_matrix)
+            else:
+                r_min_con = v_min_con = np.nan
+
+            if w_max_con is not None:
+                r_max_con, v_max_con = portfolio_stats(w_max_con, mean_returns, cov_matrix)
+                max_desc_con = describe_portfolio(w_max_con, asset_names, mean_returns, cov_matrix)
+            else:
+                r_max_con = v_max_con = np.nan
+
+            # ------------------------------
+            # Plot: Risk–avkastning
+            # ------------------------------
+
             st.subheader("Resultat: Risk–avkastningsdiagram")
 
             fig, ax = plt.subplots(figsize=(8, 6))
-            ax.scatter(port_vols, port_returns, s=5, alpha=0.3, label="Slumpade portföljer")
-            ax.scatter(
-                min_desc["Årsvolatilitet"],
-                min_desc["Förväntad årsavkastning"],
-                color="green",
-                s=80,
-                label="Minsta varians",
-                zorder=5,
-            )
-            ax.scatter(
-                max_desc["Årsvolatilitet"],
-                max_desc["Förväntad årsavkastning"],
-                color="purple",
-                s=80,
-                label="Max Sharpe",
-                zorder=5,
-            )
+
+            # Monte Carlo-punkter
+            if show_monte_carlo:
+                ax.scatter(
+                    port_vols,
+                    port_returns,
+                    s=3,
+                    alpha=0.25,
+                    label="Monte Carlo-portföljer (constrained)",
+                )
+
+            # Constrained effektiv front
+            if front_risk_con.size > 0:
+                ax.plot(
+                    front_risk_con,
+                    front_ret_con,
+                    color="tab:orange",
+                    linewidth=2,
+                    label="Effektiv front (constrained)",
+                )
+
+            # Unconstrained effektiv front
+            if show_theoretical and front_risk_unc.size > 0:
+                ax.plot(
+                    front_risk_unc,
+                    front_ret_unc,
+                    color="tab:blue",
+                    linewidth=2,
+                    label="Effektiv front (teoretisk, unconstrained)",
+                )
+
+            # Markera minsta varians & max Sharpe – unconstrained
+            if show_theoretical and w_min_unc is not None:
+                ax.scatter(
+                    v_min_unc,
+                    r_min_unc,
+                    color="blue",
+                    marker="o",
+                    s=80,
+                    label="Minsta varians (teori)",
+                )
+            if show_theoretical and w_max_unc is not None:
+                ax.scatter(
+                    v_max_unc,
+                    r_max_unc,
+                    color="blue",
+                    marker="x",
+                    s=80,
+                    label="Max Sharpe (teori)",
+                )
+
+            # Markera minsta varians & max Sharpe – constrained
+            if w_min_con is not None:
+                ax.scatter(
+                    v_min_con,
+                    r_min_con,
+                    color="orange",
+                    marker="o",
+                    s=80,
+                    label="Minsta varians (constrained)",
+                )
+            if w_max_con is not None:
+                ax.scatter(
+                    v_max_con,
+                    r_max_con,
+                    color="orange",
+                    marker="x",
+                    s=80,
+                    label="Max Sharpe (constrained)",
+                )
+
             ax.set_xlabel("Risk (årsvolatilitet)")
             ax.set_ylabel("Förväntad årsavkastning")
-            ax.set_title("Portföljsimulering med aktie-/ränte- & svensk/utländsk-constraints")
+            ax.set_title(
+                "Portföljer: Monte Carlo & effektiv front\n"
+                "(teoretisk vs constrained med dina regler)"
+            )
             ax.grid(True)
             ax.legend()
             st.pyplot(fig, clear_figure=True)
 
-            # ------ Historisk portföljutveckling + framtidsprojektion ------
+            # ------------------------------
+            # Historisk + förväntad utveckling (constrained Max Sharpe)
+            # ------------------------------
 
-            st.subheader("Historisk och förväntad portföljutveckling")
+            if w_max_con is not None and max_desc_con is not None:
+                st.subheader("Historisk & förväntad portföljutveckling (Max Sharpe – constrained)")
 
-            # Historiska månadsavkastningar
-            hist = returns[selected_names]
+                hist = returns[selected_names]
+                hist_port_ret = (hist * w_max_con).sum(axis=1)
+                hist_index = (1 + hist_port_ret).cumprod() * 100
 
-            # Välj en portfölj att rita – t.ex. Max Sharpe
-            chosen_w = w_max
+                years_forward = 10
+                periods = years_forward * 12
+                expected_annual_return = max_desc_con["Förväntad årsavkastning"]
+                expected_monthly = (1 + expected_annual_return) ** (1 / 12) - 1
 
-            # Viktad historisk utveckling
-            hist_port_ret = (hist * chosen_w).sum(axis=1)
+                future_index = [hist_index.iloc[-1]]
+                for _ in range(periods):
+                    future_index.append(future_index[-1] * (1 + expected_monthly))
 
-            # Gör om till index (start 100)
-            hist_index = (1 + hist_port_ret).cumprod() * 100
+                future_dates = pd.date_range(
+                    hist_index.index[-1], periods=periods + 1, freq="ME"
+                )
+                future_series = pd.Series(future_index, index=future_dates)
 
-            # ----- Framtida projektion -----
-            years_forward = 10
-            periods = years_forward * 12
+                fig_hist, ax_hist = plt.subplots(figsize=(10, 5))
+                ax_hist.plot(hist_index.index, hist_index.values, label="Historisk utveckling")
+                ax_hist.plot(
+                    future_series.index,
+                    future_series.values,
+                    label="Förväntad utveckling (10 år)",
+                    linestyle="--",
+                )
+                ax_hist.set_title(
+                    "Historisk & framtida portföljutveckling – Max Sharpe-portfölj (constrained)"
+                )
+                ax_hist.set_ylabel("Index (start = 100)")
+                ax_hist.grid(True)
+                ax_hist.legend()
+                st.pyplot(fig_hist, clear_figure=True)
 
-            expected_annual_return = max_desc["Förväntad årsavkastning"]
-            expected_monthly = (1 + expected_annual_return) ** (1 / 12) - 1
+            # ------------------------------
+            # Nyckelportföljer – tabeller
+            # ------------------------------
 
-            future_index = [hist_index.iloc[-1]]
-            for _ in range(periods):
-                future_index.append(future_index[-1] * (1 + expected_monthly))
-
-            future_dates = pd.date_range(hist_index.index[-1], periods=periods + 1, freq="M")
-
-            future_series = pd.Series(future_index, index=future_dates)
-
-            # ----- Plotta -----
-            fig_hist, ax_hist = plt.subplots(figsize=(10, 5))
-
-            ax_hist.plot(hist_index.index, hist_index.values, label="Historisk utveckling")
-            ax_hist.plot(future_series.index, future_series.values, label="Förväntad utveckling (10 år)",
-                         linestyle="--")
-
-            ax_hist.set_title("Historisk & framtida portföljutveckling")
-            ax_hist.set_ylabel("Index (start = 100)")
-            ax_hist.grid(True)
-            ax_hist.legend()
-
-            st.pyplot(fig_hist, clear_figure=True)
-
-            # tabeller
-            st.subheader("Nyckelportföljer")
-
+            st.subheader("Nyckelportföljer (teori, constrained & Monte Carlo)")
 
             def _format(desc: pd.Series) -> pd.DataFrame:
+                """Konverterar describe_portfolio-Serie till tabell, filtrerar småvikter."""
                 dfp = desc.to_frame("Värde").copy()
-
-                # Markera vilka rader som är vikter (innan vi filtrerar)
                 mask_w = dfp.index.str.startswith("Vikt ")
 
-                # Gör vikterna numeriska (0–1)
-                dfp.loc[mask_w, "Värde"] = dfp.loc[mask_w, "Värde"].astype(float)
-
-                # Dela upp i "info-rader" och "viktrader"
                 df_info = dfp[~mask_w]
-                df_weights = dfp[mask_w]
+                df_weights = dfp[mask_w].copy()
 
-                # Filtrera bort vikter under min_display_weight
-                df_weights = df_weights[df_weights["Värde"] >= min_display_weight]
+                if not df_weights.empty:
+                    df_weights["Värde"] = df_weights["Värde"].astype(float)
+                    df_weights = df_weights[df_weights["Värde"] >= min_display_weight]
+                    df_weights["Värde"] = df_weights["Värde"] * 100
 
-                # Skala vikterna till procent
-                df_weights["Värde"] = df_weights["Värde"] * 100
+                return pd.concat([df_info, df_weights])
 
-                # Slå ihop igen: info överst, vikter under
-                dfp_out = pd.concat([df_info, df_weights])
+            col1, col2 = st.columns(2)
 
-                return dfp_out
+            with col1:
+                st.markdown("### Teoretisk (unconstrained)")
+                if min_desc_unc is not None:
+                    st.markdown("**Minsta varians**")
+                    st.dataframe(_format(min_desc_unc).style.format("{:.2f}"), width="stretch")
+                if max_desc_unc is not None:
+                    st.markdown("**Max Sharpe**")
+                    st.dataframe(_format(max_desc_unc).style.format("{:.2f}"), width="stretch")
 
+            with col2:
+                st.markdown("### Faktisk (constrained)")
+                if min_desc_con is not None:
+                    st.markdown("**Minsta varians**")
+                    st.dataframe(_format(min_desc_con).style.format("{:.2f}"), width="stretch")
+                if max_desc_con is not None:
+                    st.markdown("**Max Sharpe**")
+                    st.dataframe(_format(max_desc_con).style.format("{:.2f}"), width="stretch")
 
-            st.markdown("### Minsta varians-portfölj")
-            st.dataframe(_format(min_desc).style.format("{:.2f}"), use_container_width=True)
+            st.markdown("### Monte Carlo – bästa portföljer (simulerade)")
+            st.markdown("**Minsta varians (lägst risk bland simulerade)**")
+            st.dataframe(_format(mc_min_desc).style.format("{:.2f}"), width="stretch")
 
-            st.markdown("### Max Sharpe-portfölj")
-            st.dataframe(_format(max_desc).style.format("{:.2f}"), use_container_width=True)
+            st.markdown("**Max Sharpe (bäst risk/avkastning bland simulerade)**")
+            st.dataframe(_format(mc_max_desc).style.format("{:.2f}"), width="stretch")
 
-            # ------ Pajdiagram över fondtyper (viktad med portföljvikter) -------
-            st.subheader("Fondfördelning mellan fondtyper (viktad portfölj)")
+            # ------------------------------
+            # Fondfördelning – unconstrained vs constrained
+            # ------------------------------
 
-            type_weights = {
-                "Räntefond": 0.0,
-                "Svensk aktiefond": 0.0,
-                "Utländsk aktiefond": 0.0,
-            }
+            st.subheader("Fondfördelning mellan fondtyper (Max Sharpe)")
 
-            # använd t.ex. Max Sharpe-portföljen
-            for i, name in enumerate(selected_names):
-                ftype = fund_types[name]  # "Räntefond", "Svensk aktiefond", "Utländsk aktiefond"
-                w = float(w_max[i])
-                if w < min_display_weight:
-                    continue  # hoppa över småvikter
-                if ftype in type_weights:
-                    type_weights[ftype] += w
+            def type_weight_dict(weights: np.ndarray) -> dict[str, float]:
+                tw = {"Räntefond": 0.0, "Svensk aktiefond": 0.0, "Utländsk aktiefond": 0.0}
+                for i, name in enumerate(selected_names):
+                    ftype = fund_types[name]
+                    w = float(weights[i])
+                    if w < min_display_weight:
+                        continue
+                    if ftype in tw:
+                        tw[ftype] += w
+                # ta bort tomma kategorier
+                return {k: v for k, v in tw.items() if v > 0}
 
-            # ta bort fondtyper med 0 vikt
-            type_weights = {k: v for k, v in type_weights.items() if v > 0}
+            col_p1, col_p2 = st.columns(2)
 
-            if type_weights:
-                fig_pie, ax_pie = plt.subplots(figsize=(6, 6))
-                ax_pie.pie(
-                    list(type_weights.values()),
-                    labels=list(type_weights.keys()),
-                    autopct='%1.1f%%'
-                )
-                ax_pie.set_title("Fördelning mellan fondtyper i vald portfölj (≥ min vikt)")
-                st.pyplot(fig_pie, clear_figure=True)
-            else:
-                st.info("Inga fondtyper över vald minimivikt att visa i pajdiagrammet.")
+            # Unconstrained Max Sharpe
+            with col_p1:
+                st.markdown("**Teoretisk Max Sharpe (unconstrained)**")
+                if w_max_unc is not None:
+                    tw_unc = type_weight_dict(w_max_unc)
+                    if tw_unc:
+                        fig_pie1, ax_pie1 = plt.subplots(figsize=(5, 5))
+                        ax_pie1.pie(
+                            list(tw_unc.values()),
+                            labels=list(tw_unc.keys()),
+                            autopct="%1.1f%%",
+                        )
+                        ax_pie1.set_title("Fondtyper – teoretisk")
+                        st.pyplot(fig_pie1, clear_figure=True)
+                    else:
+                        st.info("Inga vikter över min viktnivå för teoretisk portfölj.")
+                else:
+                    st.info("Teoretisk Max Sharpe kunde inte beräknas.")
 
-
+            # Constrained Max Sharpe
+            with col_p2:
+                st.markdown("**Max Sharpe (constrained)**")
+                if w_max_con is not None:
+                    tw_con = type_weight_dict(w_max_con)
+                    if tw_con:
+                        fig_pie2, ax_pie2 = plt.subplots(figsize=(5, 5))
+                        ax_pie2.pie(
+                            list(tw_con.values()),
+                            labels=list(tw_con.keys()),
+                            autopct="%1.1f%%",
+                        )
+                        ax_pie2.set_title("Fondtyper – constrained")
+                        st.pyplot(fig_pie2, clear_figure=True)
+                    else:
+                        st.info("Inga vikter över min viktnivå för constrained portfölj.")
+                else:
+                    st.info("Constrained Max Sharpe kunde inte beräknas.")
 
     elif len(selected_names) > 0:
         st.info("Välj minst två fonder för att kunna simulera.")
 else:
     st.info("👉 Börja med att ladda fonder i Steg 1.")
-
