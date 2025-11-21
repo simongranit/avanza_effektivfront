@@ -1,4 +1,5 @@
-from typing import Dict, Tuple
+from typing import Dict, Optional, Tuple
+
 import numpy as np
 import pandas as pd
 from scipy.optimize import minimize
@@ -21,6 +22,77 @@ def compute_annual_stats(returns: pd.DataFrame) -> Tuple[pd.Series, pd.DataFrame
     cov_annual = cov_monthly * 12
 
     return mean_annual, cov_annual
+
+
+def max_drawdown_from_returns(
+    returns: pd.Series,
+) -> Tuple[float, Optional[pd.Timestamp], Optional[pd.Timestamp], pd.Series]:
+    """
+    Beräkna max drawdown (som positiv andel) utifrån avkastningsserie.
+
+    Returnerar (max_drawdown, peak_date, trough_date, drawdown_series).
+    """
+
+    r = returns.dropna()
+    if r.empty:
+        return 0.0, None, None, pd.Series(dtype=float)
+
+    cumulative = (1 + r).cumprod()
+    running_max = cumulative.cummax()
+    drawdown = cumulative / running_max - 1
+
+    trough_date = drawdown.idxmin()
+    peak_date = running_max.loc[:trough_date].idxmax()
+    max_dd = float(abs(drawdown.min()))
+
+    return max_dd, peak_date, trough_date, drawdown
+
+
+def max_drawdown_from_prices(
+    prices: pd.Series,
+) -> Tuple[float, Optional[pd.Timestamp], Optional[pd.Timestamp], pd.Series]:
+    """Max drawdown baserat på prisserie."""
+
+    p = prices.sort_index().dropna()
+    if p.empty:
+        return 0.0, None, None, pd.Series(dtype=float)
+
+    returns = p.pct_change().dropna()
+    return max_drawdown_from_returns(returns)
+
+
+def portfolio_max_drawdown(
+    returns: pd.DataFrame, weights: np.ndarray
+) -> Tuple[float, Optional[pd.Timestamp], Optional[pd.Timestamp], pd.Series]:
+    """Max drawdown för en portfölj givet historiska avkastningar och vikter."""
+
+    port_returns = returns.mul(weights, axis=1).sum(axis=1)
+    return max_drawdown_from_returns(port_returns)
+
+
+def bootstrap_max_drawdown(
+    portfolio_returns: pd.Series, n_simulations: int = 300
+) -> float:
+    """
+    Grov uppskattning av simulerad max drawdown via bootstrap på historiska
+    portföljavkastningar. Returnerar medianen av simulerade max drawdowns.
+    """
+
+    r = portfolio_returns.dropna().values
+    if r.size == 0:
+        return float("nan")
+
+    draws = []
+    n = len(r)
+    for _ in range(n_simulations):
+        sample = np.random.choice(r, size=n, replace=True)
+        dd, _, _, _ = max_drawdown_from_returns(pd.Series(sample))
+        draws.append(dd)
+
+    if not draws:
+        return float("nan")
+
+    return float(np.median(draws))
 
 
 # ------------------------------
@@ -172,6 +244,7 @@ def simulate_portfolios(
     n_portfolios: int,
     rf: float,
     min_equity_share: float = 0.0,
+    max_drawdown: float | None = None,
 ) -> Dict[str, np.ndarray]:
     """
     Monte Carlo-simulering av portföljer.
@@ -183,9 +256,12 @@ def simulate_portfolios(
     for_idx = np.where(for_eq_mask)[0]
     bond_idx = np.where(~(swe_eq_mask | for_eq_mask))[0]
 
-    port_returns, port_vols, sharpes, weights = [], [], [], []
+    port_returns, port_vols, sharpes, weights, drawdowns = [], [], [], [], []
 
-    for _ in range(n_portfolios):
+    attempts = 0
+    max_attempts = max(n_portfolios * 10, 1000)
+    while len(port_returns) < n_portfolios and attempts < max_attempts:
+        attempts += 1
         w = sample_weights_with_constraints(
             n_assets=n_assets,
             swe_eq_idx=swe_idx,
@@ -196,6 +272,11 @@ def simulate_portfolios(
             max_foreign_equity_frac=max_foreign_equity_frac,
             min_equity=min_equity_share,
         )
+
+        dd, _, _, _ = portfolio_max_drawdown(returns, w)
+        if max_drawdown is not None and dd > max_drawdown:
+            continue
+
         r = float(np.dot(w, mean_returns.values))
         v = float(np.sqrt(w @ cov_matrix.values @ w))
         s = (r - rf) / v if v > 0 else float("nan")
@@ -204,6 +285,12 @@ def simulate_portfolios(
         port_vols.append(v)
         sharpes.append(s)
         weights.append(w)
+        drawdowns.append(dd)
+
+    if len(port_returns) < n_portfolios:
+        raise RuntimeError(
+            "Kunde inte hitta tillräckligt många portföljer som uppfyller drawdown-kravet."
+        )
 
     return {
         "returns": np.array(port_returns),
@@ -212,6 +299,7 @@ def simulate_portfolios(
         "weights": np.array(weights),
         "mean_returns": mean_returns,
         "cov_matrix": cov_matrix,
+        "drawdowns": np.array(drawdowns),
     }
 
 
