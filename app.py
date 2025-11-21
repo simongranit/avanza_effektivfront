@@ -536,7 +536,7 @@ with tab_analysis:
                 else:
                     r_min_con = v_min_con = np.nan
 
-                if w_max_con is not None:
+                if w_max_con is not None and not returns.empty:
                     r_max_con, v_max_con = portfolio_stats(
                         w_max_con, mean_returns, cov_matrix
                     )
@@ -605,7 +605,7 @@ with tab_analysis:
                         s=80,
                         label="Minsta varians (constrained)",
                     )
-                if w_max_con is not None:
+                if w_max_con is not None and not returns.empty:
                     ax.scatter(
                         v_max_con,
                         r_max_con,
@@ -627,36 +627,71 @@ with tab_analysis:
 
                 st.subheader("Förväntad utveckling över 10 år")
 
-                years = np.arange(0, 11)
-                fig_hist, ax_hist = plt.subplots(figsize=(8, 4))
+                fig_hist, ax_hist = plt.subplots(figsize=(10, 4))
                 init_invest = 100
 
-                def plot_growth(weights: np.ndarray, label: str, color: str) -> None:
-                    r, v = portfolio_stats(weights, mean_returns, cov_matrix)
-                    # antag lognormal approx för enkel visualisering
-                    future = init_invest * np.exp(
-                        (r - (v**2) / 2) * years + v * np.sqrt(years)
+                def expected_growth(
+                    start_value: float, annual_return: float, annual_vol: float, years: np.ndarray
+                ) -> np.ndarray:
+                    """Antar lognormal fördelning för att rita en förväntad bana."""
+
+                    return start_value * np.exp(
+                        (annual_return - (annual_vol**2) / 2) * years
+                        + annual_vol * np.sqrt(years)
                     )
-                    ax_hist.plot(years, future, label=label, color=color)
 
-                if w_max_unc is not None and show_theoretical:
-                    plot_growth(w_max_unc, "Teoretisk Max Sharpe", "blue")
-                if w_max_con is not None:
-                    plot_growth(w_max_con, "Max Sharpe (constrained)", "orange")
+                if w_max_con is not None and not returns.empty:
+                    hist_portfolio_returns = returns[selected_names].mul(
+                        w_max_con, axis=1
+                    ).sum(axis=1)
+                    hist_index = (1 + hist_portfolio_returns).cumprod() * init_invest
+                    hist_years = (hist_index.index - hist_index.index[0]).days / 365.25
+                    ax_hist.plot(
+                        hist_years,
+                        hist_index.values,
+                        label="Historisk utveckling (Max Sharpe)",
+                        color="orange",
+                    )
 
-                if show_monte_carlo:
-                    future_series = init_invest * (
-                        1 + pd.Series(port_returns).sort_values().rolling(50).mean().fillna(0)
+                    years_ahead = np.linspace(0, 10, 121)
+                    future_con = expected_growth(
+                        start_value=float(hist_index.iloc[-1]),
+                        annual_return=r_max_con,
+                        annual_vol=v_max_con,
+                        years=years_ahead,
                     )
                     ax_hist.plot(
-                        future_series.index,
-                        future_series.values,
-                        label="Förväntad utveckling (10 år)",
+                        hist_years[-1] + years_ahead,
+                        future_con,
+                        label="Prognos framåt (Max Sharpe, constrained)",
+                        color="orange",
                         linestyle="--",
                     )
+
+                    if show_theoretical and w_max_unc is not None:
+                        years_ahead = np.linspace(0, 10, 121)
+                        future_unc = expected_growth(
+                            start_value=float(hist_index.iloc[-1]),
+                            annual_return=r_max_unc,
+                            annual_vol=v_max_unc,
+                            years=years_ahead,
+                        )
+                        ax_hist.plot(
+                            hist_years[-1] + years_ahead,
+                            future_unc,
+                            label="Prognos framåt (teoretisk Max Sharpe)",
+                            color="tab:blue",
+                            linestyle="--",
+                        )
+                else:
+                    st.info(
+                        "Max Sharpe-portföljen kunde inte beräknas (eller saknar historik), så historik/prognos kan inte visas."
+                    )
+
                 ax_hist.set_title(
                     "Historisk & framtida portföljutveckling – Max Sharpe-portfölj (constrained)"
                 )
+                ax_hist.set_xlabel("År sedan start")
                 ax_hist.set_ylabel("Index (start = 100)")
                 ax_hist.grid(True)
                 ax_hist.legend()
