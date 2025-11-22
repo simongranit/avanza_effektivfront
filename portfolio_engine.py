@@ -26,16 +26,24 @@ def compute_annual_stats(returns: pd.DataFrame) -> Tuple[pd.Series, pd.DataFrame
 
 def max_drawdown_from_returns(
     returns: pd.Series,
-) -> Tuple[float, Optional[pd.Timestamp], Optional[pd.Timestamp], pd.Series]:
+) -> Tuple[
+    float,
+    Optional[pd.Timestamp],
+    Optional[pd.Timestamp],
+    pd.Series,
+    Optional[int],
+    Optional[int],
+]:
     """
     Beräkna max drawdown (som positiv andel) utifrån avkastningsserie.
 
-    Returnerar (max_drawdown, peak_date, trough_date, drawdown_series).
+    Returnerar (max_drawdown, peak_date, trough_date, drawdown_series,
+    dagar_peak_till_botten, dagar_peak_till_återhämtning).
     """
 
     r = returns.dropna()
     if r.empty:
-        return 0.0, None, None, pd.Series(dtype=float)
+        return 0.0, None, None, pd.Series(dtype=float), None, None
 
     cumulative = (1 + r).cumprod()
     running_max = cumulative.cummax()
@@ -45,17 +53,52 @@ def max_drawdown_from_returns(
     peak_date = running_max.loc[:trough_date].idxmax()
     max_dd = float(abs(drawdown.min()))
 
-    return max_dd, peak_date, trough_date, drawdown
+    days_to_trough = None
+    if peak_date is not None and trough_date is not None:
+        if isinstance(r.index, pd.DatetimeIndex):
+            days_to_trough = int((trough_date - peak_date).days)
+        else:
+            days_to_trough = int(r.index.get_loc(trough_date) - r.index.get_loc(peak_date))
+
+    days_to_recovery = None
+    if peak_date is not None and trough_date is not None:
+        target_level = running_max.loc[peak_date]
+        post_trough = cumulative.loc[trough_date:]
+        recovery_candidates = post_trough[post_trough >= target_level]
+        if not recovery_candidates.empty:
+            recovery_date = recovery_candidates.index[0]
+            if isinstance(r.index, pd.DatetimeIndex):
+                days_to_recovery = int((recovery_date - peak_date).days)
+            else:
+                days_to_recovery = int(
+                    r.index.get_loc(recovery_date) - r.index.get_loc(peak_date)
+                )
+
+    return (
+        max_dd,
+        peak_date,
+        trough_date,
+        drawdown,
+        days_to_trough,
+        days_to_recovery,
+    )
 
 
 def max_drawdown_from_prices(
     prices: pd.Series,
-) -> Tuple[float, Optional[pd.Timestamp], Optional[pd.Timestamp], pd.Series]:
+) -> Tuple[
+    float,
+    Optional[pd.Timestamp],
+    Optional[pd.Timestamp],
+    pd.Series,
+    Optional[int],
+    Optional[int],
+]:
     """Max drawdown baserat på prisserie."""
 
     p = prices.sort_index().dropna()
     if p.empty:
-        return 0.0, None, None, pd.Series(dtype=float)
+        return 0.0, None, None, pd.Series(dtype=float), None, None
 
     returns = p.pct_change().dropna()
     return max_drawdown_from_returns(returns)
@@ -63,7 +106,14 @@ def max_drawdown_from_prices(
 
 def portfolio_max_drawdown(
     returns: pd.DataFrame, weights: np.ndarray
-) -> Tuple[float, Optional[pd.Timestamp], Optional[pd.Timestamp], pd.Series]:
+) -> Tuple[
+    float,
+    Optional[pd.Timestamp],
+    Optional[pd.Timestamp],
+    pd.Series,
+    Optional[int],
+    Optional[int],
+]:
     """Max drawdown för en portfölj givet historiska avkastningar och vikter."""
 
     port_returns = returns.mul(weights, axis=1).sum(axis=1)
@@ -86,7 +136,7 @@ def bootstrap_max_drawdown(
     n = len(r)
     for _ in range(n_simulations):
         sample = np.random.choice(r, size=n, replace=True)
-        dd, _, _, _ = max_drawdown_from_returns(pd.Series(sample))
+        dd, _, _, _, _, _ = max_drawdown_from_returns(pd.Series(sample))
         draws.append(dd)
 
     if not draws:
