@@ -29,6 +29,13 @@ from portfolio_engine import (
 
 CONFIG_PATH = Path(__file__).resolve().parent / "fondkonfiguration.json"
 FUND_TYPE_OPTIONS = ["Räntefond", "Svensk aktiefond", "Utländsk aktiefond"]
+INVESTMENT_HORIZON_OPTIONS: dict[str, int | None] = {
+    "0–1 år": 1,
+    "1–3 år": 3,
+    "3–5 år": 5,
+    "5–10 år": 10,
+    ">10 år": None,
+}
 
 
 def guess_fund_type(
@@ -86,6 +93,21 @@ def sync_managed_funds_from_series(price_series: dict[str, pd.Series]) -> None:
     st.session_state["managed_funds"] = managed
 
 
+def apply_horizon_filter(
+    price_series: dict[str, pd.Series], horizon_years: int | None, end: dt.date
+) -> dict[str, pd.Series]:
+    """Filtrerar prisserier så att de slutar vid end och startar enligt horisont."""
+
+    if horizon_years is None:
+        return price_series
+
+    cutoff = pd.Timestamp(end) - pd.DateOffset(years=horizon_years)
+    filtered = {}
+    for name, series in price_series.items():
+        filtered[name] = series.loc[series.index >= cutoff]
+    return filtered
+
+
 # ------------------------------
 # Streamlit layout
 # ------------------------------
@@ -121,6 +143,8 @@ if "fund_type_map_by_id" not in st.session_state:
     st.session_state["fund_type_map_by_id"] = {}
 if "managed_funds" not in st.session_state:
     st.session_state["managed_funds"] = []
+if "investment_horizon" not in st.session_state:
+    st.session_state["investment_horizon"] = "5–10 år"
 
 # ------------------------------
 # SIDEBAR – generella inställningar
@@ -216,10 +240,12 @@ show_theoretical = st.sidebar.checkbox("Visa teoretisk (unconstrained) front", v
 
 
 # ------------------------------
-# TABS: Fondhantering & Analys
+# TABS: Fondhantering, Horisont & Analys
 # ------------------------------
 
-tab_manage, tab_analysis = st.tabs(["Fondhantering", "Analys"])
+tab_manage, tab_horizon, tab_analysis = st.tabs(
+    ["Fondhantering", "Investeringshorisont", "Analys"]
+)
 
 with tab_manage:
     st.subheader("Hantera fonder: lägg till, ta bort och klassificera")
@@ -377,8 +403,43 @@ with tab_manage:
         st.info("Lägg till eller ladda fonder för att komma igång.")
 
 
+with tab_horizon:
+    st.subheader("Välj investeringshorisont")
+    st.write(
+        "Använd en fördefinierad horisont för att filtrera historiska data och "
+        "beräkna förväntad avkastning över vald period i analysen."
+    )
+
+    horizon_labels = list(INVESTMENT_HORIZON_OPTIONS.keys())
+    default_index = horizon_labels.index(st.session_state["investment_horizon"])
+    selected_horizon = st.radio(
+        "Horisontintervall",
+        horizon_labels,
+        index=default_index,
+        help="Påverkar vilka historiska perioder som används och projektioner i analysen.",
+    )
+
+    st.session_state["investment_horizon"] = selected_horizon
+
+    horizon_years = INVESTMENT_HORIZON_OPTIONS[selected_horizon]
+    if horizon_years is None:
+        st.info(
+            "Horisont över 10 år använder all tillgänglig historik och visar projektioner "
+            "över 12 år framåt."
+        )
+    else:
+        st.success(
+            f"Du har valt {selected_horizon}. Analysen använder de senaste {horizon_years} åren "
+            "och projektioner med samma tidshorisont."
+        )
+
+
 with tab_analysis:
     price_series = st.session_state.get("price_series")
+
+    horizon_label = st.session_state.get("investment_horizon", "5–10 år")
+    horizon_years = INVESTMENT_HORIZON_OPTIONS.get(horizon_label)
+    projection_years = horizon_years if horizon_years is not None else 12
 
     if price_series:
         st.subheader("Välj fonder för analys")
@@ -393,6 +454,10 @@ with tab_analysis:
         if len(selected_names) >= 2:
             fund_types = st.session_state.get("fund_types", {})
             fund_type_map_by_id = st.session_state.get("fund_type_map_by_id", {})
+            st.caption(
+                f"Vald investeringshorisont: {horizon_label} – historik filtreras till "
+                f"senaste {horizon_years if horizon_years is not None else 'möjliga'} åren."
+            )
             for name in selected_names:
                 if name not in fund_types:
                     fund_types[name] = guess_fund_type(
@@ -408,7 +473,16 @@ with tab_analysis:
 
             if run_button:
                 selected_prices = {name: price_series[name] for name in selected_names}
+                selected_prices = apply_horizon_filter(
+                    selected_prices, horizon_years, end_date
+                )
                 returns = build_return_matrix(selected_prices, freq="ME")
+
+                if returns.empty:
+                    st.error(
+                        "Ingen avkastningsdata kvar efter filtrering. Justera horisont eller datum."
+                    )
+                    st.stop()
 
                 st.write("Månadsavkastningar (sista 5 rader):")
                 st.dataframe(
@@ -887,7 +961,9 @@ with tab_analysis:
                             "Ingen historisk avkastningsserie kunde tas fram för drawdown-plott."
                         )
 
-                st.subheader("Förväntad utveckling över 10 år")
+                st.subheader(
+                    f"Förväntad utveckling över {int(projection_years)} år"
+                )
 
                 fig_hist, ax_hist = plt.subplots(figsize=(10, 4))
                 init_invest = 100
@@ -915,7 +991,7 @@ with tab_analysis:
                         color="orange",
                     )
 
-                    years_ahead = np.linspace(0, 10, 121)
+                    years_ahead = np.linspace(0, projection_years, int(projection_years * 12) + 1)
                     future_con = expected_growth(
                         start_value=float(hist_index.iloc[-1]),
                         annual_return=r_max_con,
@@ -934,10 +1010,12 @@ with tab_analysis:
                     )
 
                     if show_theoretical and w_max_unc is not None:
-                        years_ahead = np.linspace(0, 10, 121)
+                        years_ahead = np.linspace(
+                            0, projection_years, int(projection_years * 12) + 1
+                        )
                         future_unc = expected_growth(
                             start_value=float(hist_index.iloc[-1]),
-                        annual_return=r_max_unc,
+                            annual_return=r_max_unc,
                         annual_vol=v_max_unc,
                         years=years_ahead,
                     )
@@ -957,7 +1035,8 @@ with tab_analysis:
                     )
 
                 ax_hist.set_title(
-                    "Historisk & framtida portföljutveckling – Max Sharpe-portfölj (constrained)"
+                    "Historisk & framtida portföljutveckling – Max Sharpe-portfölj "
+                    f"(constrained, {int(projection_years)} år)"
                 )
                 ax_hist.set_xlabel("År")
                 ax_hist.set_ylabel("Index (start = 100)")
@@ -967,6 +1046,19 @@ with tab_analysis:
                 ax_hist.legend()
                 fig_hist.autofmt_xdate()
                 st.pyplot(fig_hist, clear_figure=True)
+
+                target_return = None
+                if r_max_con is not None:
+                    target_return = r_max_con
+                elif r_max_unc is not None:
+                    target_return = r_max_unc
+
+                if target_return is not None:
+                    cumulative_roi = (1 + target_return) ** projection_years - 1
+                    st.caption(
+                        f"Mål-ROI över {int(projection_years)} år för vald horisont: "
+                        f"{cumulative_roi*100:.2f} %."
+                    )
 
                 st.subheader("Nyckelportföljer (teori, constrained & Monte Carlo)")
 
