@@ -24,12 +24,16 @@ def test_compute_annual_stats_scales_returns_and_covariance():
 
 
 def test_max_drawdown_from_returns_handles_empty_series():
-    max_dd, peak, trough, dd_series = max_drawdown_from_returns(pd.Series(dtype=float))
+    max_dd, peak, trough, dd_series, days_to_trough, days_to_recovery = max_drawdown_from_returns(
+        pd.Series(dtype=float)
+    )
 
     assert max_dd == 0.0
     assert peak is None
     assert trough is None
     assert dd_series.empty
+    assert days_to_trough is None
+    assert days_to_recovery is None
 
 
 def test_portfolio_max_drawdown_combines_weights():
@@ -41,10 +45,10 @@ def test_portfolio_max_drawdown_combines_weights():
     )
     weights = np.array([0.6, 0.4])
 
-    max_dd, _, _, _ = portfolio_max_drawdown(returns, weights)
+    max_dd, _, _, _, _, _ = portfolio_max_drawdown(returns, weights)
 
     expected_portfolio = returns.mul(weights, axis=1).sum(axis=1)
-    expected_max_dd, _, _, _ = max_drawdown_from_returns(expected_portfolio)
+    expected_max_dd, _, _, _, _, _ = max_drawdown_from_returns(expected_portfolio)
 
     assert np.isclose(max_dd, expected_max_dd)
 

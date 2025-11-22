@@ -1,6 +1,7 @@
 import datetime as dt
 from pathlib import Path
 
+import matplotlib.dates as mdates
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
@@ -418,15 +419,26 @@ with tab_analysis:
                 st.markdown("### Historisk max drawdown per fond")
                 fund_dd_rows = []
                 for name in selected_names:
-                    dd, peak_dt, trough_dt, _ = max_drawdown_from_prices(
-                        selected_prices[name]
-                    )
+                    (
+                        dd,
+                        peak_dt,
+                        trough_dt,
+                        _,
+                        days_to_trough,
+                        days_to_recovery,
+                    ) = max_drawdown_from_prices(selected_prices[name])
                     fund_dd_rows.append(
                         {
                             "Fond": name,
                             "Max drawdown (%)": round(dd * 100, 2),
                             "Start (peak)": peak_dt.date() if peak_dt is not None else "-",
                             "Botten": trough_dt.date() if trough_dt is not None else "-",
+                            "Dagar till botten": days_to_trough
+                            if days_to_trough is not None
+                            else "-",
+                            "Dagar till återhämtning": days_to_recovery
+                            if days_to_recovery is not None
+                            else "-",
                         }
                     )
 
@@ -609,9 +621,14 @@ with tab_analysis:
                 ) -> None:
                     if weights is None or returns.empty or np.isnan(exp_ret):
                         return
-                    dd_val, peak_dt, trough_dt, _ = portfolio_max_drawdown(
-                        returns, weights
-                    )
+                    (
+                        dd_val,
+                        peak_dt,
+                        trough_dt,
+                        _,
+                        days_to_trough,
+                        days_to_recovery,
+                    ) = portfolio_max_drawdown(returns, weights)
                     sim_dd = bootstrap_max_drawdown(
                         build_portfolio_returns(weights), n_simulations=150
                     )
@@ -624,6 +641,12 @@ with tab_analysis:
                             "Simulerad max drawdown (bootstrap) (%)": sim_dd * 100,
                             "Peak": peak_dt.date() if peak_dt is not None else "-",
                             "Botten": trough_dt.date() if trough_dt is not None else "-",
+                            "Dagar till botten": days_to_trough
+                            if days_to_trough is not None
+                            else "-",
+                            "Dagar till återhämtning": days_to_recovery
+                            if days_to_recovery is not None
+                            else "-",
                         }
                     )
 
@@ -786,9 +809,14 @@ with tab_analysis:
                 if plot_weights is not None:
                     port_ret_series = build_portfolio_returns(plot_weights)
                     if not port_ret_series.empty:
-                        dd_plot, peak_dt, trough_dt, _ = portfolio_max_drawdown(
-                            returns, plot_weights
-                        )
+                        (
+                            dd_plot,
+                            peak_dt,
+                            trough_dt,
+                            _,
+                            days_to_trough,
+                            days_to_recovery,
+                        ) = portfolio_max_drawdown(returns, plot_weights)
                         cumulative = (1 + port_ret_series).cumprod()
                         cumulative = cumulative / cumulative.iloc[0]
                         running_max = cumulative.cummax()
@@ -826,12 +854,28 @@ with tab_analysis:
                                 color="red",
                                 zorder=5,
                             )
+                        duration_parts: list[str] = []
+                        if days_to_trough is not None:
+                            duration_parts.append(
+                                f"peak→botten: {int(days_to_trough)} dagar"
+                            )
+                        if days_to_recovery is not None:
+                            duration_parts.append(
+                                f"peak→återhämtning: {int(days_to_recovery)} dagar"
+                            )
+                        duration_text = (
+                            f" ({', '.join(duration_parts)})" if duration_parts else ""
+                        )
                         ax_dd.set_title(
                             f"Max drawdown för {plot_label}: {dd_plot*100:.2f} %"
+                            f"{duration_text}"
                         )
                         ax_dd.set_ylabel("Index (start = 100)")
+                        ax_dd.xaxis.set_major_locator(mdates.YearLocator())
+                        ax_dd.xaxis.set_major_formatter(mdates.DateFormatter("%Y"))
                         ax_dd.grid(True)
                         ax_dd.legend()
+                        fig_dd.autofmt_xdate()
                         st.pyplot(fig_dd, clear_figure=True)
                     else:
                         st.info(
@@ -858,9 +902,9 @@ with tab_analysis:
                         w_max_con, axis=1
                     ).sum(axis=1)
                     hist_index = (1 + hist_portfolio_returns).cumprod() * init_invest
-                    hist_years = (hist_index.index - hist_index.index[0]).days / 365.25
+                    hist_dates = hist_index.index
                     ax_hist.plot(
-                        hist_years,
+                        hist_dates,
                         hist_index.values,
                         label="Historisk utveckling (Max Sharpe)",
                         color="orange",
@@ -873,8 +917,11 @@ with tab_analysis:
                         annual_vol=v_max_con,
                         years=years_ahead,
                     )
+                    future_con_dates = hist_dates[-1] + pd.to_timedelta(
+                        years_ahead * 365.25, unit="D"
+                    )
                     ax_hist.plot(
-                        hist_years[-1] + years_ahead,
+                        future_con_dates,
                         future_con,
                         label="Prognos framåt (Max Sharpe, constrained)",
                         color="orange",
@@ -885,12 +932,15 @@ with tab_analysis:
                         years_ahead = np.linspace(0, 10, 121)
                         future_unc = expected_growth(
                             start_value=float(hist_index.iloc[-1]),
-                            annual_return=r_max_unc,
-                            annual_vol=v_max_unc,
-                            years=years_ahead,
+                        annual_return=r_max_unc,
+                        annual_vol=v_max_unc,
+                        years=years_ahead,
+                    )
+                        future_unc_dates = hist_dates[-1] + pd.to_timedelta(
+                            years_ahead * 365.25, unit="D"
                         )
                         ax_hist.plot(
-                            hist_years[-1] + years_ahead,
+                            future_unc_dates,
                             future_unc,
                             label="Prognos framåt (teoretisk Max Sharpe)",
                             color="tab:blue",
@@ -904,10 +954,13 @@ with tab_analysis:
                 ax_hist.set_title(
                     "Historisk & framtida portföljutveckling – Max Sharpe-portfölj (constrained)"
                 )
-                ax_hist.set_xlabel("År sedan start")
+                ax_hist.set_xlabel("År")
                 ax_hist.set_ylabel("Index (start = 100)")
+                ax_hist.xaxis.set_major_locator(mdates.YearLocator())
+                ax_hist.xaxis.set_major_formatter(mdates.DateFormatter("%Y"))
                 ax_hist.grid(True)
                 ax_hist.legend()
+                fig_hist.autofmt_xdate()
                 st.pyplot(fig_hist, clear_figure=True)
 
                 st.subheader("Nyckelportföljer (teori, constrained & Monte Carlo)")
