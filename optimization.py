@@ -155,7 +155,7 @@ def efficient_frontier_constrained(mean_returns: pd.Series,
         w_opt = np.array(w.value).reshape(-1)
 
         if max_drawdown is not None and returns_history is not None:
-            dd, _, _, _ = portfolio_max_drawdown(returns_history, w_opt)
+            dd, *_ = portfolio_max_drawdown(returns_history, w_opt)
             if dd > max_drawdown:
                 continue
 

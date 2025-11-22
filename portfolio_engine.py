@@ -323,7 +323,7 @@ def simulate_portfolios(
             min_equity=min_equity_share,
         )
 
-        dd, _, _, _ = portfolio_max_drawdown(returns, w)
+        dd, *_ = portfolio_max_drawdown(returns, w)
         if max_drawdown is not None and dd > max_drawdown:
             continue
 

@@ -435,17 +435,19 @@ with tab_analysis:
                             "Botten": trough_dt.date() if trough_dt is not None else "-",
                             "Dagar till botten": days_to_trough
                             if days_to_trough is not None
-                            else "-",
+                            else None,
                             "Dagar till återhämtning": days_to_recovery
                             if days_to_recovery is not None
-                            else "-",
+                            else None,
                         }
                     )
 
+                fund_dd_df = pd.DataFrame(fund_dd_rows)
+                for col in ["Dagar till botten", "Dagar till återhämtning"]:
+                    fund_dd_df[col] = pd.array(fund_dd_df[col], dtype="Int64")
+
                 st.dataframe(
-                    pd.DataFrame(fund_dd_rows).sort_values(
-                        by="Max drawdown (%)", ascending=False
-                    ),
+                    fund_dd_df.sort_values(by="Max drawdown (%)", ascending=False),
                     width="stretch",
                 )
 
@@ -643,10 +645,10 @@ with tab_analysis:
                             "Botten": trough_dt.date() if trough_dt is not None else "-",
                             "Dagar till botten": days_to_trough
                             if days_to_trough is not None
-                            else "-",
+                            else None,
                             "Dagar till återhämtning": days_to_recovery
                             if days_to_recovery is not None
-                            else "-",
+                            else None,
                         }
                     )
 
@@ -769,6 +771,9 @@ with tab_analysis:
                 if dd_rows:
                     st.subheader("Max drawdown – nyckelportföljer")
                     dd_df = pd.DataFrame(dd_rows)
+                    for col in ["Dagar till botten", "Dagar till återhämtning"]:
+                        if col in dd_df:
+                            dd_df[col] = pd.array(dd_df[col], dtype="Int64")
                     numeric_cols = dd_df.select_dtypes(include=[np.number]).columns
                     style = dd_df.sort_values(
                         by="Historisk max drawdown (%)", ascending=False
